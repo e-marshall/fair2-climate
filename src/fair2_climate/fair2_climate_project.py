@@ -1,9 +1,95 @@
+import os
+
+# Set pooch cache directory BEFORE importing pooch or any packages that use it
+# This must be done at module level before any imports
+# Try multiple locations in order of preference
+pooch_cache_base = None
+for cache_base in ["/tmp/.cache", os.path.join(os.path.expanduser("~"), ".cache"), "/tmp"]:
+    try:
+        pooch_cache_dir = os.path.join(cache_base, "pooch")
+        os.makedirs(pooch_cache_dir, exist_ok=True, mode=0o755)
+        # Test write
+        test_file = os.path.join(pooch_cache_dir, ".test_write")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        pooch_cache_base = cache_base
+        break
+    except (OSError, PermissionError):
+        continue
+
+if pooch_cache_base is None:
+    # Last resort: use current directory
+    pooch_cache_base = os.getcwd()
+    pooch_cache_dir = os.path.join(pooch_cache_base, "pooch")
+    try:
+        os.makedirs(pooch_cache_dir, exist_ok=True, mode=0o755)
+    except (OSError, PermissionError):
+        pass
+
+# Set environment variable for pooch to use
+# Ensure it's never empty or root directory
+if pooch_cache_base and pooch_cache_base != "/" and pooch_cache_base != "":
+    os.environ["POOCH_DIR"] = pooch_cache_base
+else:
+    # Fallback to /tmp if all else fails
+    os.environ["POOCH_DIR"] = "/tmp/.cache"
+    pooch_cache_base = "/tmp/.cache"
+
 import numpy as np
 import pandas as pd
 from datetime import datetime
 import xarray as xr
-from fair2_climate.fill_from_rcmip import fill_from_rcmip
+import pooch
+import logging
 
+# Monkey-patch pooch's os_cache and retrieve to use our directory
+_original_os_cache = pooch.os_cache
+_original_retrieve = pooch.retrieve
+
+def _patched_os_cache(appname=None, version=None, env=None):
+    """Patched os_cache that respects POOCH_DIR environment variable."""
+    if env and env in os.environ:
+        base = os.environ[env]
+    elif "POOCH_DIR" in os.environ:
+        base = os.environ["POOCH_DIR"]
+    else:
+        return _original_os_cache(appname, version, env)
+    
+    if appname:
+        return os.path.join(base, appname)
+    return base
+
+def _patched_retrieve(url, known_hash=None, fname=None, path=None, processor=None, downloader=None, progressbar=False):
+    """Patched retrieve that uses our cache directory if path is not specified."""
+    if path is None and "POOCH_DIR" in os.environ:
+        pooch_dir = os.environ["POOCH_DIR"]
+        # Ensure POOCH_DIR is valid (not empty, not root)
+        if pooch_dir and pooch_dir != "/" and pooch_dir != "":
+            # If no path specified, use our cache directory
+            path = os.path.join(pooch_dir, "pooch")
+            try:
+                os.makedirs(path, exist_ok=True, mode=0o755)
+            except (OSError, PermissionError):
+                # If we can't create it, let the original function handle the error
+                pass
+    return _original_retrieve(url, known_hash, fname, path, processor, downloader, progressbar)
+
+# Apply patches if POOCH_DIR is set
+if "POOCH_DIR" in os.environ:
+    pooch.os_cache = _patched_os_cache
+    pooch.retrieve = _patched_retrieve
+#from fair2_climate.fill_from_rcmip import fill_from_rcmip
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Log the pooch cache configuration after logging is set up
+if "POOCH_DIR" in os.environ:
+    logger.info(f"Pooch cache directory configured: {os.environ['POOCH_DIR']}")
+    logger.info(f"Pooch will use: {os.path.join(os.environ['POOCH_DIR'], 'pooch')}")
+else:
+    logger.warning("POOCH_DIR not set, pooch will use default cache location")
 
 # Function that prepares the RCMIP emissions data
 def prep_rcmip_emissions_conc(scenario, rcmip_file):
@@ -33,6 +119,25 @@ def fair2_project_climate(
     output_oceantemp_file,
     output_ohc_file,
 ):
+    # Verify pooch cache directory is writable (it was set at module level)
+    pooch_cache_dir = os.path.join(os.environ.get("POOCH_DIR", "/tmp/.cache"), "pooch")
+    try:
+        # Verify it's writable
+        test_file = os.path.join(pooch_cache_dir, ".test_write")
+        with open(test_file, "w") as test_f:
+            test_f.write("test")
+        os.remove(test_file)
+        logger.info(f"Pooch cache directory verified: {pooch_cache_dir}")
+    except (OSError, PermissionError) as e:
+        logger.warning(f"Pooch cache directory {pooch_cache_dir} is not writable: {e}")
+        # Try to recreate it
+        try:
+            os.makedirs(pooch_cache_dir, exist_ok=True, mode=0o755)
+            logger.info(f"Recreated pooch cache directory: {pooch_cache_dir}")
+        except (OSError, PermissionError) as e2:
+            logger.error(f"Could not create pooch cache directory {pooch_cache_dir}: {e2}")
+            raise
+    
     from fair import FAIR
     from fair.interface import fill, initialise
     from fair.io import read_properties
@@ -58,11 +163,11 @@ def fair2_project_climate(
 
     # f.fill_from_rcmip()
     # if rcmip_file=='./rcmip/rcmip-emissions-annual-means-v5-1-0.csv':
-    fill_from_rcmip(
-        f,
-        rcmip_emissions_file=rcmip_emissions_file,
-        rcmip_concentration_file=rcmip_concentration_file,
-        rcmip_forcing_file=rcmip_forcing_file,
+    f.fill_from_rcmip(
+        #f,
+        #rcmip_emissions_file=rcmip_emissions_file,
+        #rcmip_concentration_file=rcmip_concentration_file,
+        #rcmip_forcing_file=rcmip_forcing_file,
     )
     # else:
     # fill_from_csv(f,
